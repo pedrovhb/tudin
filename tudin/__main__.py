@@ -8,14 +8,13 @@ file or module).
 import argparse
 import difflib
 import json
-import os
 import sys
-import textwrap
 from dataclasses import dataclass
 from functools import cached_property
+from itertools import chain
 from pathlib import Path
-from rich_argparse import RichHelpFormatter
 
+from rich_argparse import RichHelpFormatter
 import black
 import libcst as cst
 from rich.console import Console, ConsoleOptions, RenderResult
@@ -118,7 +117,7 @@ class ExportsDisplay:
     def get_file_code(self) -> str:
         return self.file.read_text()
 
-    def get_current_file_all(self) -> str | None:
+    def get_current_file_all(self) -> cst.SimpleStatementLine | None:
         """Get the current __all__ variable from the file."""
         module = cst.parse_module(self.get_file_code())
         return next(
@@ -159,9 +158,10 @@ def _interactive_change_all_vars(file: str | Path, dry_run: bool = True) -> None
         _console.print(f"[red]No exportable names found in [bold blue]{file}[/]")
         return
 
-    module = cst.parse_module(display.code)
+    module = cst.parse_module(display.get_file_code())
     current_all_statement = display.get_current_file_all()
     proposed_all = cst.parse_module(ExportsDisplay.from_file(file).code).body[0]
+    # print(proposed_all)
     proposed_all_str = cst.Module(body=[proposed_all]).code.strip()
 
     if current_all_statement is None:
@@ -169,9 +169,8 @@ def _interactive_change_all_vars(file: str | Path, dry_run: bool = True) -> None
         _console.print("Calculated __all__ exports:")
         _console.print(Syntax(proposed_all_str, "python", background_color="default"))
 
-        user_input = _console.input("Would you like to set this as the __all__ variable? [y/N] ")
-        if user_input.lower().strip() == "y":
-
+        user_input = _console.input("Would you like to set this as the __all__ variable? [Y/n] ")
+        if user_input.lower().strip() in ("y", "", "yes"):
             if dry_run:
                 _console.print(
                     Syntax(
@@ -181,7 +180,7 @@ def _interactive_change_all_vars(file: str | Path, dry_run: bool = True) -> None
                     )
                 )
             else:
-                with open(file, "a") as f:
+                with file.open("a") as f:
                     f.write("\n\n" + proposed_all_str)
             _console.print(f"Added __all__ variable to [bold]{file}[/]")
         else:
@@ -238,9 +237,9 @@ def _interactive_change_all_vars(file: str | Path, dry_run: bool = True) -> None
         _console.print()
 
         user_input = _console.input(
-            "Would you like to replace the current __all__ variable? [y/N] "
+            "Would you like to replace the current __all__ variable? [Y/n] "
         )
-        if user_input.lower().strip() == "y":
+        if user_input.lower().strip() in ("y", "yes", ""):
             module = module.deep_replace(current_all_statement, proposed_all)
 
             if dry_run:
@@ -252,8 +251,14 @@ def _interactive_change_all_vars(file: str | Path, dry_run: bool = True) -> None
                     )
                 )
             else:
-                with open(file, "w") as f:
-                    f.write(module.code + "\n")
+                with file.open("w") as f:
+                    # f.write(module.code + "\n")
+                    f.write(
+                        module.code.replace(
+                            cst.Module(body=[current_all_statement]).code,
+                            f"\n\n{proposed_all_str}\n",
+                        )
+                    )
 
     _console.print("\n")
 
@@ -283,7 +288,6 @@ def _app() -> None:
         action=argparse.BooleanOptionalAction,
     )
     mutually_exclusive = parser.add_mutually_exclusive_group()
-
     mutually_exclusive.add_argument(
         "--interactive",
         "-i",
@@ -326,6 +330,15 @@ def _app() -> None:
         action="store_true",
         help="Do not pretty-print output.",
     )
+    parser.add_argument(
+        "--exclude",
+        "-e",
+        type=Path,
+        nargs="*",
+        help="Exclude files or directories from being processed.",
+        default=["test", "tests", "venv"],
+        action="append",
+    )
 
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
@@ -333,14 +346,14 @@ def _app() -> None:
 
     args = parser.parse_args()
 
-    input_paths: list[Path] = args.input_filenames
+    input_paths: set[Path] = set(args.input_filenames)
     try:
         input_paths.remove(Path("-"))
-    except ValueError:
+    except KeyError:
         pass
     else:
         for line in sys.stdin:
-            input_paths.append(Path(line.strip()))
+            input_paths.add(Path(line.strip()))
 
     paths = []
     for path in input_paths:
@@ -349,6 +362,15 @@ def _app() -> None:
                 paths.append(file)
         elif path.is_file():
             paths.append(path)
+
+    prev_paths_len = len(paths)
+    exclude = [Path(p) for p in chain.from_iterable(args.exclude)]
+    paths = [p for p in paths if not any(p.is_relative_to(e) for e in exclude)]
+    if len(paths) != prev_paths_len:
+        _console.print(
+            f"Excluded {prev_paths_len - len(paths)} paths from processing.",
+            style="yellow",
+        )
 
     if not paths:
         _console.print(
@@ -386,4 +408,7 @@ if __name__ == "__main__":
     _app()
 
 
-__all__ = ("ExportsDisplay", "_app", "get_all_exports", "_interactive_change_all_vars")
+__all__ = (
+    "ExportsDisplay",
+    "get_all_exports",
+)
